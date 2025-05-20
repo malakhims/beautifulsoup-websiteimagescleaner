@@ -1,0 +1,187 @@
+import os
+import shutil
+from bs4 import BeautifulSoup
+from urllib.parse import unquote
+import re
+from colorama import init, Fore, Style
+
+# Initialize colorama
+init()
+
+def print_error(message):
+    print(Fore.RED + f"\u2716 Error: {message}" + Style.RESET_ALL)
+
+def print_success(message):
+    print(Fore.GREEN + f"\u2713 {message}" + Style.RESET_ALL)
+
+def print_warning(message):
+    print(Fore.YELLOW + f"\u26A0 {message}" + Style.RESET_ALL)
+
+def print_info(message):
+    print(Fore.BLUE + f"ℹ {message}" + Style.RESET_ALL)
+
+def copy_website_with_referenced_images(src_dir, dest_dir):
+    try:
+        if not os.path.exists(src_dir):
+            raise FileNotFoundError(f"Source directory not found: {src_dir}")
+
+        os.makedirs(dest_dir, exist_ok=True)
+        print_info(f"Creating optimized website copy at: {dest_dir}")
+
+        referenced_images = set()
+        processed_files = 0
+        found_references = 0
+        
+        # First pass: find all referenced images before copying
+        print_info("Scanning for referenced images...")
+        for root, dirs, files in os.walk(src_dir):
+            for file in files:
+                if file.endswith(('.html', '.htm', '.css', '.js')):
+                    file_path = os.path.join(root, file)
+                    found = process_file_for_images(file_path, src_dir, referenced_images)
+                    found_references += found
+                    processed_files += 1
+
+        print_success(f"Processed {processed_files} files, found {found_references} image references")
+
+
+        print_info("Scanning for referenced images...")
+        for root, _, files in os.walk(src_dir):
+            for file in files:
+                if file.endswith(('.html', '.htm', '.css', '.js')):
+                    file_path = os.path.join(root, file)
+                    found = process_file_for_images(file_path, src_dir, referenced_images)
+                    found_references += found
+                    processed_files += 1
+
+        print_success(f"Processed {processed_files} files, found {found_references} image references")
+
+        print_info("Copying files...")
+        copied_files = 0
+        skipped_images = 0
+
+        for root, _, files in os.walk(src_dir):
+            rel_path = os.path.relpath(root, src_dir)
+            dest_root = os.path.join(dest_dir, rel_path)
+            os.makedirs(dest_root, exist_ok=True)
+
+            for file in files:
+                if file in ('.', '..'):
+                    continue
+                src_file = os.path.join(root, file)
+                dest_file = os.path.join(dest_root, file)
+                if not os.path.isfile(src_file):
+                    continue
+                if not file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico')):
+                    try:
+                        shutil.copy2(src_file, dest_file)
+                        copied_files += 1
+                    except PermissionError:
+                        print_warning(f"Permission denied for file: {src_file}")
+                    except Exception as e:
+                        print_error(f"Failed to copy {src_file}: {e}")
+
+        for img_path in referenced_images:
+            abs_src_path = os.path.join(src_dir, img_path)
+            abs_dest_path = os.path.join(dest_dir, img_path)
+
+            os.makedirs(os.path.dirname(abs_dest_path), exist_ok=True)
+
+            if os.path.exists(abs_src_path):
+                try:
+                    shutil.copy2(abs_src_path, abs_dest_path)
+                    copied_files += 1
+                    print(f"Copied image: {img_path}")
+                except Exception as e:
+                    print_warning(f"Failed to copy image {img_path}: {e}")
+            else:
+                skipped_images += 1
+                print_warning(f"Referenced image not found at source: {img_path}")
+
+        print_success(f"Copy complete! {copied_files} files copied, {skipped_images} images skipped")
+        return True
+
+    except Exception as e:
+        print_error(f"Fatal error during copy: {str(e)}")
+        if os.path.exists(dest_dir):
+            print_warning("Cleaning up partial copy...")
+            shutil.rmtree(dest_dir)
+        return False
+
+def process_file_for_images(file_path, base_dir, referenced_images):
+    found = 0
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if file_path.endswith(('.html', '.htm')):
+                soup = BeautifulSoup(content, 'html.parser')
+                for img in soup.find_all('img'):
+                    src = img.get('src')
+                    if src and add_referenced_image(src, base_dir, file_path, referenced_images):
+                        found += 1
+                for tag in soup.find_all(style=True):
+                    matches = re.findall(r'url\([\'\"]?(.*?)[\'\"]?\)', tag['style'])
+                    for match in matches:
+                        if add_referenced_image(match, base_dir, file_path, referenced_images):
+                            found += 1
+                for source in soup.find_all('source'):
+                    srcset = source.get('srcset')
+                    if srcset:
+                        for src in srcset.split(','):
+                            src = src.strip().split()[0]
+                            if add_referenced_image(src, base_dir, file_path, referenced_images):
+                                found += 1
+            elif file_path.endswith('.css'):
+                matches = re.finditer(r'url\([\'\"]?(.*?)[\'\"]?\)', content)
+                for match in matches:
+                    if add_referenced_image(match.group(1), base_dir, file_path, referenced_images):
+                        found += 1
+            elif file_path.endswith('.js'):
+                matches = re.finditer(r'[\'\"](.*?\.(?:png|jpg|jpeg|gif|svg|webp|ico))[\'\"]', content)
+                for match in matches:
+                    if add_referenced_image(match.group(1), base_dir, file_path, referenced_images):
+                        found += 1
+    except UnicodeDecodeError:
+        print_warning(f"Skipping binary file: {file_path}")
+    except Exception as e:
+        print_error(f"Error processing {file_path}: {e}")
+    return found
+
+def add_referenced_image(img_path, base_dir, referencing_file, referenced_images):
+    img_path = img_path.strip()
+    if not img_path or img_path.startswith(('http://', 'https://', 'data:')):
+        return False
+    try:
+        img_path = img_path.replace('/', os.sep).replace('\\', os.sep)
+        img_path = img_path.split('?')[0].split('#')[0]
+        ref_dir = os.path.dirname(referencing_file)
+        if img_path.startswith(os.sep):
+            rel_path = img_path.lstrip(os.sep)
+        else:
+            abs_path = os.path.normpath(os.path.join(ref_dir, img_path))
+            rel_path = os.path.relpath(abs_path, base_dir)
+        rel_path = unquote(rel_path)
+        if rel_path not in referenced_images:
+            referenced_images.add(rel_path)
+            return True
+    except Exception as e:
+        print_error(f"Error processing image reference '{img_path}': {e}")
+    return False
+
+if __name__ == "__main__":
+    print(Fore.CYAN + "=== Website Copy Tool (Referenced Images Only) ===" + Style.RESET_ALL)
+    try:
+        default_src = r"C:\\Users\\TJ\\Desktop\\neocities"
+        src_dir = input(f"Enter source directory [{default_src}]: ").strip() or default_src
+        default_dest = f"{src_dir}_clean"
+        dest_dir = input(f"Enter destination directory [{default_dest}]: ").strip() or default_dest
+        success = copy_website_with_referenced_images(src_dir, dest_dir)
+        if success:
+            print_success("Operation completed successfully!")
+        else:
+            print_error("Operation failed with errors")
+    except KeyboardInterrupt:
+        print_error("\nOperation cancelled by user")
+    except Exception as e:
+        print_error(f"Unexpected error: {e}")
+    input("\nPress Enter to exit...")
